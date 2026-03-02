@@ -1,0 +1,17 @@
+# Kbuild output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+*.cmd
+
+# Dependency and metadata files
+*.d
+*.dwo
+*.dwp
+
+# Kernel build directories
+.tmp_versions/
