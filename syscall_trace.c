@@ -4,10 +4,12 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/printk.h>
 #include <linux/proc_fs.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/seq_file.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include <linux/minmax.h>
@@ -17,105 +19,98 @@
 #define HAVE_PROC_OPS
 #endif
 
-#define PROCFS_MAX_SIZE 2048UL
 #define PROCFS_FILENAME "syscall-trace"
 
-static struct proc_dir_entry *our_proc_file;
+static struct proc_dir_entry *entry;
 
-static char procfs_buffer[PROCFS_MAX_SIZE];
-static unsigned long procfs_buffer_size = 0;
-
-static ssize_t procfs_read(struct file *filp, char __user *buffer,
-			   size_t length, loff_t *offset)
+static void *my_seq_start(struct seq_file *s, loff_t *pos)
 {
-	if (*offset || procfs_buffer_size == 0) {
-		pr_debug("procfs_read: END\n");
+	static unsigned long counter = 0;
 
-		*offset = 0;
-		return 0;
+	// Complete 3 sequences
+	if (*pos < 3) {
+		return &counter;
 	}
-	procfs_buffer_size = min(procfs_buffer_size, length);
 
-	if (copy_to_user(buffer, procfs_buffer, procfs_buffer_size))
-		return -EFAULT;
-
-	*offset += procfs_buffer_size;
-
-	pr_debug("procfs_read: read %lu bytes\n", procfs_buffer_size);
-	return procfs_buffer_size;
+	*pos = 0;
+	return NULL;
 }
 
-static ssize_t procfs_write(struct file *filp, const char __user *buffer,
-			    size_t len, loff_t *off)
+static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos)
 {
-	procfs_buffer_size = min(PROCFS_MAX_SIZE, len);
-
-	if (copy_from_user(procfs_buffer, buffer, procfs_buffer_size))
-		return -EFAULT;
-
-	*off += procfs_buffer_size;
-
-	pr_debug("procfs_write: write %lu bytes\n", procfs_buffer_size);
-
-	return procfs_buffer_size;
+	unsigned long *tmp_v = (unsigned long *)v;
+	(*tmp_v)++;
+	(*pos)++;
+	return NULL;
 }
 
-static int procfs_open(struct inode *inode, struct file *file)
+static void my_seq_stop(struct seq_file *s, void *v)
 {
+	/* nothing to do, we use a static value in start() */
+}
+
+static int my_seq_show(struct seq_file *s, void *v)
+{
+	loff_t *spos = (loff_t *)v;
+
+	seq_printf(s, "%Ld\n", *spos);
+
 	return 0;
 }
 
-static int procfs_close(struct inode *inode, struct file *file)
+static struct seq_operations my_seq_ops = {
+	.start = my_seq_start,
+	.next = my_seq_next,
+	.stop = my_seq_stop,
+	.show = my_seq_show,
+};
+
+static int my_seq_open(struct inode *inode, struct file *file)
 {
-	return 0;
-}
+	return seq_open(file, &my_seq_ops);
+};
 
 #ifdef HAVE_PROC_OPS
 static struct proc_ops file_ops = {
-	.proc_read = procfs_read,
-	.proc_write = procfs_write,
-
-	.proc_open = procfs_open,
-	.proc_release = procfs_close,
+	.proc_open = my_seq_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = seq_release,
 };
 
 #else
 static const struct file_operations file_ops = {
-	.read = procfs_read,
-	.write = procfs_write,
-
-	.open = procfs_open,
-	.release = procfs_close,
+	.open = my_seq_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = seq_release,
 };
 #endif
 
-static int __init procfs_init(void)
+static int __init trace_init(void)
 {
-	our_proc_file = proc_create(PROCFS_FILENAME, 0644, NULL,
-				    &file_ops);
+	entry = proc_create(PROCFS_FILENAME, 0, NULL, &file_ops);
 
-	if (our_proc_file == NULL) {
-		pr_debug("Error: Could not initialize /proc/%s\n",
+	if (entry == NULL) {
+		pr_info("Error: Could not initialize /proc/%s\n",
 			 PROCFS_FILENAME);
-
 		return -ENOMEM;
 	}
 
-	proc_set_size(our_proc_file, 80);
-	proc_set_user(our_proc_file, GLOBAL_ROOT_UID, GLOBAL_ROOT_GID);
+	proc_set_size(entry, 80);
+	proc_set_user(entry, GLOBAL_ROOT_UID, GLOBAL_ROOT_GID);
 
-	pr_debug("/proc/%s created\n", PROCFS_FILENAME);
+	pr_info("/proc/%s created\n", PROCFS_FILENAME);
 	return 0;
 }
 
-static void __exit procfs_exit(void)
+static void __exit trace_exit(void)
 {
 	remove_proc_entry(PROCFS_FILENAME, NULL);
-
-	pr_debug("/proc/%s removed\n", PROCFS_FILENAME);
+	pr_info("/proc/%s removed\n", PROCFS_FILENAME);
 }
 
-module_init(procfs_init);
-module_exit(procfs_exit);
+module_init(trace_init);
+module_exit(trace_exit);
 
 MODULE_LICENSE("GPL");

@@ -1,4 +1,4 @@
-obj-m += hello-1.o
+obj-m += syscall_trace.o
 
 PWD := $(CURDIR)
 
