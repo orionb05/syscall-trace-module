@@ -23,13 +23,35 @@
 
 static struct proc_dir_entry *entry;
 
+#define NUM_BUCKETS 64
+
+struct syscall_stats {
+	u64 count;
+	u64 total_latency;
+	u64 max_latency;
+	u64 latency_hist[NUM_BUCKETS];
+};
+
+enum syscalls_tracked {
+	SYSCALL_READ,
+	SYSCALL_WRITE,
+	SYSCALL_GETPID,
+	NUM_SYSCALLS
+};
+
+static struct syscall_stats stats[NUM_SYSCALLS];
+
+static char *syscall_names[NUM_SYSCALLS] = {
+	[SYSCALL_READ] = "read",
+	[SYSCALL_WRITE] = "write",
+	[SYSCALL_GETPID] = "getpid",
+};
+
 static void *my_seq_start(struct seq_file *s, loff_t *pos)
 {
-	static unsigned long counter = 0;
-
-	// Complete 3 sequences
-	if (*pos < 3) {
-		return &counter;
+	// Each sequence prints one syscall's stats
+	if (*pos < NUM_SYSCALLS) {
+		return &(stats[*pos]);
 	}
 
 	*pos = 0;
@@ -38,10 +60,12 @@ static void *my_seq_start(struct seq_file *s, loff_t *pos)
 
 static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos)
 {
-	unsigned long *tmp_v = (unsigned long *)v;
-	(*tmp_v)++;
 	(*pos)++;
-	return NULL;
+	if(*pos >= NUM_SYSCALLS){
+		return NULL;
+	}
+
+	return &(stats[*pos]);
 }
 
 static void my_seq_stop(struct seq_file *s, void *v)
@@ -51,9 +75,12 @@ static void my_seq_stop(struct seq_file *s, void *v)
 
 static int my_seq_show(struct seq_file *s, void *v)
 {
-	loff_t *spos = (loff_t *)v;
+	struct syscall_stats *stat = (struct syscall_stats *)v;
 
-	seq_printf(s, "%Ld\n", *spos);
+	seq_printf(s, "%s:\n", syscall_names[stat - stats]);
+	seq_printf(s, "%Ld\n", stat->count);
+	seq_printf(s, "%Ld\n", stat->total_latency);
+	seq_printf(s, "%Ld\n", stat->max_latency);
 
 	return 0;
 }
