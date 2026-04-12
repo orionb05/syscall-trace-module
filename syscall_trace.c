@@ -21,6 +21,11 @@
 
 #define PROCFS_FILENAME "syscall-trace"
 
+#define INPUT_MAX_LEN 33
+static char input_buffer[INPUT_MAX_LEN];   
+
+u64 run_until_time = 0;
+
 static struct proc_dir_entry *entry;
 
 #define NUM_BUCKETS 64
@@ -97,12 +102,54 @@ static int my_seq_open(struct inode *inode, struct file *file)
 	return seq_open(file, &my_seq_ops);
 };
 
+static ssize_t my_proc_write(struct file *file, const char __user *buff,
+                              size_t len, loff_t *off)
+{
+	if (len == 0)
+    	return -EINVAL;
+
+    if (len >= INPUT_MAX_LEN) {
+		pr_info("Input too long; max %d characters\n", INPUT_MAX_LEN - 1);
+		len = INPUT_MAX_LEN - 1;
+	}
+
+	if (copy_from_user(input_buffer, buff, len))  
+		return -EFAULT;
+
+	input_buffer[len] = '\0'; // Null-terminate the input string
+
+	*off += len;
+
+	// Convert user input to an integer
+	unsigned int run_time_seconds;
+	if (kstrtoint(input_buffer, 10, &run_time_seconds))
+    	return -EINVAL;
+
+	if (run_time_seconds == 0 || run_time_seconds > 1024)
+		return -EINVAL;
+
+	// TODO: Clean syscall stats
+
+	// Signal K-probe collection to run for the specified time
+	WRITE_ONCE(run_until_time,
+           ktime_get_ns() + run_time_seconds * NSEC_PER_SEC);
+
+	pr_info("Starting collection at %llu seconds\n", ktime_get_ns() / NSEC_PER_SEC);
+	pr_info("Ending at %llu seconds\n", run_until_time / NSEC_PER_SEC);
+	
+    return len;
+}
+
 #ifdef HAVE_PROC_OPS
 static struct proc_ops file_ops = {
+	// Used on /proc read
 	.proc_open = my_seq_open,
 	.proc_read = seq_read,
 	.proc_lseek = seq_lseek,
 	.proc_release = seq_release,
+
+	// Used on /proc write
+	.proc_write = my_proc_write,
 };
 
 #else
@@ -111,10 +158,12 @@ static const struct file_operations file_ops = {
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = seq_release,
+
+	.write = my_proc_write,
 };
 #endif
 
-static int __init trace_init(void)
+static int __init mod_init(void)
 {
 	entry = proc_create(PROCFS_FILENAME, 0, NULL, &file_ops);
 
@@ -124,20 +173,19 @@ static int __init trace_init(void)
 		return -ENOMEM;
 	}
 
-	proc_set_size(entry, 80);
 	proc_set_user(entry, GLOBAL_ROOT_UID, GLOBAL_ROOT_GID);
 
 	pr_info("/proc/%s created\n", PROCFS_FILENAME);
 	return 0;
 }
 
-static void __exit trace_exit(void)
+static void __exit mod_exit(void)
 {
 	remove_proc_entry(PROCFS_FILENAME, NULL);
 	pr_info("/proc/%s removed\n", PROCFS_FILENAME);
 }
 
-module_init(trace_init);
-module_exit(trace_exit);
+module_init(mod_init);
+module_exit(mod_exit);
 
 MODULE_LICENSE("GPL");
