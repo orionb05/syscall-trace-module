@@ -39,14 +39,17 @@ struct syscall_stats {
 };
 
 enum syscalls_tracked { SYSCALL_READ, SYSCALL_MMAP, SYSCALL_FUTEX, SYSCALL_CLONE, NUM_SYSCALLS };
-
-static struct kprobe syscall_kprobes[NUM_SYSCALLS];
-static struct kprobe *syscall_kprobe_ptrs[NUM_SYSCALLS];
-
-static struct kretprobe syscall_kretprobes[NUM_SYSCALLS];
-static struct kretprobe *syscall_kretprobe_ptrs[NUM_SYSCALLS];
-
 static struct syscall_stats stats[NUM_SYSCALLS];
+
+struct probe_wrapper {
+	struct kprobe kp;
+	struct kretprobe krp;
+	int syscall_id;
+};
+static struct probe_wrapper probes[NUM_SYSCALLS];
+
+static struct kprobe *syscall_kprobe_ptrs[NUM_SYSCALLS];
+static struct kretprobe *syscall_kretprobe_ptrs[NUM_SYSCALLS];
 
 static char *syscall_symbols[NUM_SYSCALLS] = {
 	[SYSCALL_READ] = "__x64_sys_read",
@@ -166,46 +169,80 @@ static const struct file_operations file_ops = {
 
 static int kprobe_callback(struct kprobe *kp, struct pt_regs *regs)
 {
-	// TODO: Identify the associated syscall and update the stats
+	u64 now = ktime_get_ns();
+	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
+		return 0;
+
+	// Use kprobe to access wrapper struct for syscall_id value
+	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, kp);
+	int syscall_id = pw->syscall_id;
+
+	stats[syscall_id].count++;
+
 	return 0;
 }
 
 static int kretprobe_callback(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
-	// TODO: Identify the associated syscall and update the stats
+	u64 now = ktime_get_ns();
+	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
+		return 0;
+
+	// Use kretprobe instance to access wrapper struct for syscall_id value
+	struct kretprobe *rp = get_kretprobe(ri);
+	struct probe_wrapper *pw = container_of(rp, struct probe_wrapper, krp);
+	int syscall_id = pw->syscall_id;
+
 	return 0;
 }
 
 static int __init mod_init(void)
 {
-	entry = proc_create(PROCFS_FILENAME, 0, NULL, &file_ops);
-
-	if (entry == NULL) {
-		pr_info("Error: Could not initialize /proc/%s\n", PROCFS_FILENAME);
-		return -ENOMEM;
-	}
-
-	proc_set_user(entry, GLOBAL_ROOT_UID, GLOBAL_ROOT_GID);
-
-	pr_info("/proc/%s created\n", PROCFS_FILENAME);
+	int ret;
 
 	// Attach probes to beginning and end of each syscall
 	for (int i = 0; i < NUM_SYSCALLS; i++) {
-		syscall_kprobes[i].symbol_name = syscall_symbols[i];
-		syscall_kretprobes[i].kp.symbol_name = syscall_symbols[i];
+		probes[i].kp.symbol_name = syscall_symbols[i];
+		probes[i].krp.kp.symbol_name = syscall_symbols[i];
 
-		syscall_kprobes[i].pre_handler = &kprobe_callback;
-		syscall_kretprobes[i].handler = &kretprobe_callback;
+		probes[i].kp.pre_handler = &kprobe_callback;
+		probes[i].krp.handler = &kretprobe_callback;
+
+		probes[i].syscall_id = i;
 
 		// Store probe pointer for the registration functions
-		syscall_kprobe_ptrs[i] = &syscall_kprobes[i];
-		syscall_kretprobe_ptrs[i] = &syscall_kretprobes[i];
+		syscall_kprobe_ptrs[i] = &(probes[i].kp);
+		syscall_kretprobe_ptrs[i] = &(probes[i].krp);
 	}
 
-	register_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
-	register_kretprobes(syscall_kretprobe_ptrs, NUM_SYSCALLS);
+	ret = register_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
+	if (ret)
+		goto kprobe_fail;
+
+	ret = register_kretprobes(syscall_kretprobe_ptrs, NUM_SYSCALLS);
+	if (ret)
+		goto kretprobe_fail;
+
+	entry = proc_create(PROCFS_FILENAME, 0, NULL, &file_ops);
+	if (!entry) {
+		ret = -ENOMEM;
+		goto proc_fail;
+	}
+	pr_info("/proc/%s created\n", PROCFS_FILENAME);
 
 	return 0;
+
+proc_fail:
+	pr_info("Error: Could not initialize /proc/%s\n", PROCFS_FILENAME);
+	unregister_kretprobes(syscall_kretprobe_ptrs, NUM_SYSCALLS);
+
+kretprobe_fail:
+	pr_info("Error: Could not register kretprobes\n");
+	unregister_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
+
+kprobe_fail:
+	pr_info("Error: Could not register kprobes\n");
+	return ret;
 }
 
 static void __exit mod_exit(void)
