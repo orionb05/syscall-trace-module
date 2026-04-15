@@ -109,6 +109,7 @@ static struct seq_operations my_seq_ops = {
 	.show = my_seq_show,
 };
 
+// Clear and update previous syscall stats, then start printing results
 static int my_seq_open(struct inode *inode, struct file *file)
 {
 	// Clean previous global stat data
@@ -117,16 +118,14 @@ static int my_seq_open(struct inode *inode, struct file *file)
 	// Aggregate stats from reach core
 	int cpu;
 	for_each_possible_cpu(cpu) {
-		struct syscall_stats *s = per_cpu_ptr(percpu_stats, cpu);
-
 		for (int i = 0; i < NUM_SYSCALLS; i++) {
-			global_stats[i].count += s[i].count;
-			global_stats[i].total_latency += s[i].total_latency;
-			global_stats[i].max_latency =
-				max(global_stats[i].max_latency, s[i].max_latency);
-			for (int j = 0; j < NUM_BUCKETS; j++) {
-				global_stats[i].latency_hist[j] += s[i].latency_hist[j];
-			}
+			struct syscall_stats *s = per_cpu_ptr(&percpu_stats[i], cpu);
+
+			global_stats[i].count         += s->count;
+			global_stats[i].total_latency += s->total_latency;
+			global_stats[i].max_latency    = max(global_stats[i].max_latency, s->max_latency);
+			for (int j = 0; j < NUM_BUCKETS; j++)
+				global_stats[i].latency_hist[j] += s->latency_hist[j];
 		}
 	}
 
@@ -134,6 +133,7 @@ static int my_seq_open(struct inode *inode, struct file *file)
 	return seq_open(file, &my_seq_ops);
 }
 
+// Recieve the collection time, reset the statistics, and start collecting syscall stats
 static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t len, loff_t *off)
 {
 	if (len == 0)
@@ -159,7 +159,14 @@ static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t 
 	if (run_time_seconds == 0 || run_time_seconds > 1024)
 		return -EINVAL;
 
-	// TODO: Clean syscall stats
+	// Clean syscall stats
+	int cpu;
+	for_each_possible_cpu(cpu) {
+		for (int i = 0; i < NUM_SYSCALLS; i++) {
+			struct syscall_stats *s = per_cpu_ptr(&percpu_stats[i], cpu);
+			memset(s, 0, sizeof(*s));
+		}
+	}
 
 	// Signal K-probe collection to run for the specified time
 	WRITE_ONCE(run_until_time, ktime_get_ns() + run_time_seconds * NSEC_PER_SEC);
@@ -203,7 +210,7 @@ static int kprobe_callback(struct kprobe *kp, struct pt_regs *regs)
 	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, kp);
 	int syscall_id = pw->syscall_id;
 
-	this_cpu_ptr(percpu_stats)[syscall_id].count++;
+	this_cpu_ptr(&percpu_stats[syscall_id])->count++;
 
 	return 0;
 }
