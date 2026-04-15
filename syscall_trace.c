@@ -5,13 +5,16 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/version.h>
+
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/kprobes.h>
+
 #include <linux/sched.h>
 #include <linux/ktime.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
-#include <linux/seq_file.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
 #include <linux/minmax.h>
@@ -30,7 +33,7 @@ static u64 run_until_time = 0;
 
 static struct proc_dir_entry *entry;
 
-#define NUM_BUCKETS 64
+#define NUM_BUCKETS 24
 struct syscall_stats {
 	u64 count;
 	u64 total_latency;
@@ -39,7 +42,10 @@ struct syscall_stats {
 };
 
 enum syscalls_tracked { SYSCALL_READ, SYSCALL_MMAP, SYSCALL_FUTEX, SYSCALL_CLONE, NUM_SYSCALLS };
-static struct syscall_stats stats[NUM_SYSCALLS];
+
+// Each core will track syscalls independently, with global_stats aggregating the sums
+DEFINE_PER_CPU(struct syscall_stats, percpu_stats[NUM_SYSCALLS]);
+static struct syscall_stats global_stats[NUM_SYSCALLS];
 
 struct probe_wrapper {
 	struct kprobe kp;
@@ -62,7 +68,7 @@ static void *my_seq_start(struct seq_file *s, loff_t *pos)
 {
 	// Each sequence prints one syscall's stats
 	if (*pos < NUM_SYSCALLS) {
-		return &(stats[*pos]);
+		return &(global_stats[*pos]);
 	}
 
 	*pos = 0;
@@ -76,7 +82,7 @@ static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos)
 		return NULL;
 	}
 
-	return &(stats[*pos]);
+	return &(global_stats[*pos]);
 }
 
 static void my_seq_stop(struct seq_file *s, void *v)
@@ -88,7 +94,7 @@ static int my_seq_show(struct seq_file *s, void *v)
 {
 	struct syscall_stats *stat = (struct syscall_stats *)v;
 
-	seq_printf(s, "%s:\n", syscall_symbols[stat - stats]);
+	seq_printf(s, "%s:\n", syscall_symbols[stat - global_stats]);
 	seq_printf(s, "%llu\n", stat->count);
 	seq_printf(s, "%llu\n", stat->total_latency);
 	seq_printf(s, "%llu\n", stat->max_latency);
@@ -105,6 +111,26 @@ static struct seq_operations my_seq_ops = {
 
 static int my_seq_open(struct inode *inode, struct file *file)
 {
+	// Clean previous global stat data
+	memset(global_stats, 0, sizeof(global_stats));
+
+	// Aggregate stats from reach core
+	int cpu;
+	for_each_possible_cpu(cpu) {
+		struct syscall_stats *s = per_cpu_ptr(percpu_stats, cpu);
+
+		for (int i = 0; i < NUM_SYSCALLS; i++) {
+			global_stats[i].count += s[i].count;
+			global_stats[i].total_latency += s[i].total_latency;
+			global_stats[i].max_latency =
+				max(global_stats[i].max_latency, s[i].max_latency);
+			for (int j = 0; j < NUM_BUCKETS; j++) {
+				global_stats[i].latency_hist[j] += s[i].latency_hist[j];
+			}
+		}
+	}
+
+	// Begin output for each syscall's stats
 	return seq_open(file, &my_seq_ops);
 }
 
@@ -177,7 +203,7 @@ static int kprobe_callback(struct kprobe *kp, struct pt_regs *regs)
 	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, kp);
 	int syscall_id = pw->syscall_id;
 
-	stats[syscall_id].count++;
+	this_cpu_ptr(percpu_stats)[syscall_id].count++;
 
 	return 0;
 }
@@ -257,4 +283,6 @@ static void __exit mod_exit(void)
 module_init(mod_init);
 module_exit(mod_exit);
 
+MODULE_DESCRIPTION("Syscall tracing module for per‑CPU syscall latency and count aggregation");
+MODULE_AUTHOR("Orion Brown");
 MODULE_LICENSE("GPL");
