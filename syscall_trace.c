@@ -94,7 +94,7 @@ static int my_seq_show(struct seq_file *s, void *v)
 {
 	struct syscall_stats *stat = (struct syscall_stats *)v;
 
-	seq_printf(s, "%s:\n", syscall_symbols[stat - global_stats]);
+	seq_printf(s, "%s\n", syscall_symbols[stat - global_stats]);
 	seq_printf(s, "%llu\n", stat->count);
 	seq_printf(s, "%llu\n", stat->total_latency);
 	seq_printf(s, "%llu\n", stat->max_latency);
