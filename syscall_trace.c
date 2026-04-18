@@ -53,6 +53,11 @@ struct probe_wrapper {
 };
 static struct probe_wrapper probes[NUM_SYSCALLS];
 
+struct probe_data {
+    u64 entry_time;
+    u8 valid;
+};
+
 static struct kretprobe *syscall_kretprobe_ptrs[NUM_SYSCALLS];
 
 static const char *syscall_symbols[NUM_SYSCALLS] = {
@@ -204,23 +209,46 @@ static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
 		return 0;
 
+	struct probe_data *d = (struct probe_data *)ki->data;
+	d->entry_time = now;
+	d->valid = 1;
+
 	return 0;
 }
 
 static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
 	u64 now = ktime_get_ns();
-	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
+
+    struct probe_data *d = (struct probe_data *)ki->data;
+
+    // Skip if entry never ran for this instance,
+    if (d->valid != 1) {
 		return 0;
+	}
 
-	// Use kretprobe instance to access wrapper struct for syscall_id value
-	struct kretprobe *kp = get_kretprobe(ki);
-	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+	// Update stats if the run has started
+	bool in_window = READ_ONCE(run_until_time) != 0 && now <= READ_ONCE(run_until_time);
+    if (in_window) {
+        struct kretprobe *kp = get_kretprobe(ki);
+        struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+        struct syscall_stats *s = this_cpu_ptr(pw->stats);
 
-	struct syscall_stats *s = this_cpu_ptr(pw->stats);
-	s->count++;
+        u64 latency = now - d->entry_time;
 
-	return 0;
+        s->count++;
+        s->total_latency += latency;
+
+		if (latency > (u64)1.5e9)
+			pr_info("syscall exit: pid=%d comm=%s latency=%llu ns\n", current->pid, current->comm, latency);
+
+        s->max_latency = max(s->max_latency, latency);
+    }
+
+    // Always clear to avoid stale valid/entry_time
+    d->valid = 0;
+
+    return 0;
 }
 
 static int __init mod_init(void)
@@ -232,7 +260,7 @@ static int __init mod_init(void)
 		probes[i].krp.kp.symbol_name = syscall_symbols[i];
 		probes[i].krp.entry_handler = &entry_callback;
 		probes[i].krp.handler = &exit_callback;
-		probes[i].krp.data_size = sizeof(u64);
+		probes[i].krp.data_size = sizeof(struct probe_data);
 
 		probes[i].stats = &percpu_stats[i];
 

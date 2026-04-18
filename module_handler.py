@@ -64,6 +64,14 @@ def start_handler():
 
 def run_module(stress_type, duration):
 
+    # Notify module to start collecting
+    try:
+        with open("/proc/syscall-trace", "w") as f:
+            f.write(str(duration))
+    except FileNotFoundError:
+        print("File not found")
+        return 1
+
     # Induce a load for the test_type
     match stress_type:
         case StressType.CPU:
@@ -100,14 +108,6 @@ def run_module(stress_type, duration):
                 ],
                 stdout=subprocess.DEVNULL,
             )
-
-    # Notify module to start collecting
-    try:
-        with open("/proc/syscall-trace", "w") as f:
-            f.write(str(duration))
-    except FileNotFoundError:
-        print("File not found")
-        return 1
     
     time.sleep(duration)
     proc.wait()
