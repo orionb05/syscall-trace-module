@@ -48,16 +48,14 @@ DEFINE_PER_CPU(struct syscall_stats, percpu_stats[NUM_SYSCALLS]);
 static struct syscall_stats global_stats[NUM_SYSCALLS];
 
 struct probe_wrapper {
-	struct kprobe kp;
-	struct kretprobe krp;
-	int syscall_id;
+    struct kretprobe krp;
+    struct syscall_stats __percpu *stats;
 };
 static struct probe_wrapper probes[NUM_SYSCALLS];
 
-static struct kprobe *syscall_kprobe_ptrs[NUM_SYSCALLS];
 static struct kretprobe *syscall_kretprobe_ptrs[NUM_SYSCALLS];
 
-static char *syscall_symbols[NUM_SYSCALLS] = {
+static const char *syscall_symbols[NUM_SYSCALLS] = {
 	[SYSCALL_READ] = "__x64_sys_read",
 	[SYSCALL_MMAP] = "__x64_sys_mmap",
 	[SYSCALL_FUTEX] = "__x64_sys_futex",
@@ -168,7 +166,7 @@ static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t 
 		}
 	}
 
-	// Signal K-probe collection to run for the specified time
+	// Signal probes to run for the specified time
 	WRITE_ONCE(run_until_time, ktime_get_ns() + run_time_seconds * NSEC_PER_SEC);
 
 	pr_info("Starting collection at %llu seconds\n", ktime_get_ns() / NSEC_PER_SEC);
@@ -200,31 +198,27 @@ static const struct file_operations file_ops = {
 };
 #endif
 
-static int kprobe_callback(struct kprobe *kp, struct pt_regs *regs)
+static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
 	u64 now = ktime_get_ns();
 	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
 		return 0;
 
-	// Use kprobe to access wrapper struct for syscall_id value
-	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, kp);
-	int syscall_id = pw->syscall_id;
-
-	this_cpu_ptr(&percpu_stats[syscall_id])->count++;
-
 	return 0;
 }
 
-static int kretprobe_callback(struct kretprobe_instance *ri, struct pt_regs *regs)
+static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
 	u64 now = ktime_get_ns();
 	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
 		return 0;
 
 	// Use kretprobe instance to access wrapper struct for syscall_id value
-	struct kretprobe *rp = get_kretprobe(ri);
-	struct probe_wrapper *pw = container_of(rp, struct probe_wrapper, krp);
-	int syscall_id = pw->syscall_id;
+	struct kretprobe *kp = get_kretprobe(ki);
+	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+
+	struct syscall_stats *s = this_cpu_ptr(pw->stats);
+	s->count++;
 
 	return 0;
 }
@@ -235,22 +229,16 @@ static int __init mod_init(void)
 
 	// Attach probes to beginning and end of each syscall
 	for (int i = 0; i < NUM_SYSCALLS; i++) {
-		probes[i].kp.symbol_name = syscall_symbols[i];
 		probes[i].krp.kp.symbol_name = syscall_symbols[i];
+		probes[i].krp.entry_handler = &entry_callback;
+		probes[i].krp.handler = &exit_callback;
+		probes[i].krp.data_size = sizeof(u64);
 
-		probes[i].kp.pre_handler = &kprobe_callback;
-		probes[i].krp.handler = &kretprobe_callback;
+		probes[i].stats = &percpu_stats[i];
 
-		probes[i].syscall_id = i;
-
-		// Store probe pointer for the registration functions
-		syscall_kprobe_ptrs[i] = &(probes[i].kp);
+		// Store probe pointer for the registration function
 		syscall_kretprobe_ptrs[i] = &(probes[i].krp);
 	}
-
-	ret = register_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
-	if (ret)
-		goto kprobe_fail;
 
 	ret = register_kretprobes(syscall_kretprobe_ptrs, NUM_SYSCALLS);
 	if (ret)
@@ -271,10 +259,6 @@ proc_fail:
 
 kretprobe_fail:
 	pr_info("Error: Could not register kretprobes\n");
-	unregister_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
-
-kprobe_fail:
-	pr_info("Error: Could not register kprobes\n");
 	return ret;
 }
 
@@ -283,13 +267,12 @@ static void __exit mod_exit(void)
 	remove_proc_entry(PROCFS_FILENAME, NULL);
 	pr_info("/proc/%s removed\n", PROCFS_FILENAME);
 
-	unregister_kprobes(syscall_kprobe_ptrs, NUM_SYSCALLS);
 	unregister_kretprobes(syscall_kretprobe_ptrs, NUM_SYSCALLS);
 }
 
 module_init(mod_init);
 module_exit(mod_exit);
 
-MODULE_DESCRIPTION("Syscall tracing module for per‑CPU syscall latency and count aggregation");
+MODULE_DESCRIPTION("Syscall tracing module for per-CPU syscall latency and count aggregation");
 MODULE_AUTHOR("Orion Brown");
 MODULE_LICENSE("GPL");
