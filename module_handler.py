@@ -3,7 +3,7 @@ import time
 from enum import Enum
 import psutil
 
-DURATION = 5
+DURATION = 8
 
 class StressType(Enum):
     CPU = 1
@@ -78,11 +78,11 @@ def induce_load(stress_type, intensity_level):
     if intensity_level == 2:
         print("High-intensity run")
         cores = max(1, int(cores))
-        ram_gb = max(1, int(ram_gb * 0.6))
+        ram_gb = max(1, int(ram_gb * 0.7))
     elif intensity_level == 1:
         print("Medium-intensity run")
         cores = max(1, cores // 2)
-        ram_gb = max(1, int(ram_gb * 0.3))
+        ram_gb = max(1, int(ram_gb * 0.4))
     else:
         print("Baseline run (no stress)")
         return None
@@ -181,10 +181,10 @@ def insert_module():
 
     try:
         print("Cleaning project directory...\n")
-        subprocess.run(["make", "clean"], check=True)
+        subprocess.run(["make", "clean"], check=True, stdout=subprocess.DEVNULL,)
 
         print("Regenerating linux module..\n")
-        subprocess.run(["make"], check=True)
+        subprocess.run(["make"], check=True, stdout=subprocess.DEVNULL,)
         
         print("Checking if old module is already loaded...\n")
         remove_module()
@@ -207,7 +207,7 @@ def remove_module():
     try:
         res = subprocess.run(["grep", "syscall_trace", "/proc/modules"], stdout=subprocess.PIPE)
         if res.stdout.split():
-            subprocess.run(["rmmod", "syscall_trace.ko"], check=True)
+            subprocess.run(["rmmod", "syscall_trace.ko"], check=True, stdout=subprocess.DEVNULL,)
             print("Module has been removed.")
 
     except Exception as e:

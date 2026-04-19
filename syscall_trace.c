@@ -42,7 +42,7 @@ struct syscall_stats {
 	u64 latency_hist[NUM_BUCKETS];
 };
 
-enum syscalls_tracked { SYSCALL_READ, SYSCALL_MMAP, SYSCALL_FUTEX, SYSCALL_CLONE, NUM_SYSCALLS };
+enum syscalls_tracked { SYSCALL_READ, SYSCALL_MMAP, SYSCALL_FUTEX, SYSCALL_OPENAT, NUM_SYSCALLS };
 
 // Each core will track syscalls independently, with global_stats aggregating the sums
 DEFINE_PER_CPU(struct syscall_stats, percpu_stats[NUM_SYSCALLS]);
@@ -65,7 +65,7 @@ static const char *syscall_symbols[NUM_SYSCALLS] = {
 	[SYSCALL_READ] = "__x64_sys_read",
 	[SYSCALL_MMAP] = "__x64_sys_mmap",
 	[SYSCALL_FUTEX] = "__x64_sys_futex",
-	[SYSCALL_CLONE] = "__x64_sys_clone",
+	[SYSCALL_OPENAT] = "__x64_sys_openat",
 };
 
 static const u64 bucket_bounds[NUM_BUCKETS] = {
