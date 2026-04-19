@@ -1,6 +1,9 @@
 import subprocess
 import time
 from enum import Enum
+import psutil
+
+DURATION = 5
 
 class StressType(Enum):
     CPU = 1
@@ -9,7 +12,6 @@ class StressType(Enum):
     MIXED = 4
 
 class SyscallEntry:
-
     def __init__(self):
         self.name = ""
         self.count = 0
@@ -18,15 +20,13 @@ class SyscallEntry:
         self.latency_hist = []
 
 def main():
-
-    if insert_module() != 0:
+    try:
+        insert_module()
+        start_handler()
+        remove_module()
+    except Exception as e:
+        print("Error:", e)
         return
-    
-    # TODO: get_system_info() for tailored stress calls
-
-    start_handler()
-
-    remove_module()
 
 def start_handler():
 
@@ -45,47 +45,68 @@ def start_handler():
             except ValueError:
                 print("Invalid input, please try again.")
 
-        # Perhaps make this user-configurable
-        run_time = 5
-        
-        # Induce load and start module collection
-        if run_module(stress_type, run_time) != 0:
-            break
+        results = []
 
-        # Retrive syscall stats from test run
-        syscall_stats = []
-        if collect_stats(syscall_stats) != 0:
-            break
-        
+        # Run module with varying stress levels
+        for intensity_level in range(3):
+            try:
+                stress_proc = induce_load(stress_type, intensity_level)
+                run_module() 
+
+                if stress_proc is not None:
+                    stress_proc.wait()
+                    
+                syscall_stats = collect_stats()
+            except Exception as e:
+                if stress_proc:
+                    stress_proc.terminate()
+                raise RuntimeError("failed during module test") from e
+            
+            results.append(syscall_stats)
+            print_stats(syscall_stats)
+            
         # TODO: Use a visualizer to print stats
 
-        # DEBUGGING: Print stats directly for sanity check
-        print_stats(syscall_stats)
+def induce_load(stress_type, intensity_level):
 
-def run_module(stress_type, duration):
+    stress_duration = DURATION + 1
 
-    stress_duration = duration + 1
+    # Collect system info for dynamic and safe stresses
+    cores = psutil.cpu_count(logical=True)
+    ram_gb = psutil.virtual_memory().total // (1024 ** 3)
 
-    # Induce a load for the test_type
+    if intensity_level == 2:
+        print("High-intensity run")
+        cores = max(1, int(cores))
+        ram_gb = max(1, int(ram_gb * 0.6))
+    elif intensity_level == 1:
+        print("Medium-intensity run")
+        cores = max(1, cores // 2)
+        ram_gb = max(1, int(ram_gb * 0.3))
+    else:
+        print("Baseline run (no stress)")
+        return None
+
+    # Induce a stress load for the test_type
     match stress_type:
         case StressType.CPU:
             print("Running CPU test...")
             proc = subprocess.Popen(
-                ["stress", "--cpu", "2", "--timeout", str(stress_duration)],
+                ["stress", "--cpu", str(cores), "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
         case StressType.IO:
             print("Running IO test...")
             proc = subprocess.Popen(
-                ["stress", "--io", "2", "--timeout", str(stress_duration)],
+                ["stress", "--io", str(cores), "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
         case StressType.MEM:
             print("Running Memory test...")
             proc = subprocess.Popen(
-                ["stress", "--vm", "1", "--vm-bytes", "2G", "--timeout", str(stress_duration)],
+                ["stress", "--vm", "1", "--vm-bytes", str(ram_gb)+"G", "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
@@ -94,34 +115,35 @@ def run_module(stress_type, duration):
             proc = subprocess.Popen(
                 [
                     "stress",
-                    "--cpu", "1",
-                    "--io", "1",
+                    "--cpu", str(cores),
+                    "--io", str(cores),
                     "--vm", "1",
-                    "--vm-bytes", "2G",
+                    "--vm-bytes", str(ram_gb)+"G",
                     "--timeout", str(stress_duration)
                 ],
                 stdout=subprocess.DEVNULL,
             )
-            
+
+    return proc
+
+def run_module():
+
     time.sleep(1)  # let stress ramp up
 
     # Notify module to start collecting
     try:
         with open("/proc/syscall-trace", "w") as f:
-            f.write(str(duration))
+            f.write(str(DURATION))
     except FileNotFoundError:
-        print("File not found")
-        return 1
+        raise RuntimeError("syscall-trace proc entry missing")
 
-    time.sleep(duration)
-    proc.wait()
-
+    time.sleep(DURATION)
     print("Test complete.\n")
 
-    return 0
 
-def collect_stats(syscall_stats):
+def collect_stats():
 
+    stats = []
     try:
         with open("/proc/syscall-trace", "r") as file:
             while True:
@@ -139,7 +161,7 @@ def collect_stats(syscall_stats):
                 max_line = file.readline()
 
                 if not (count_line and total_line and max_line):
-                    return 1
+                    raise RuntimeError("misformatted module stat output")
 
                 syscall.count = int(count_line.strip())
                 syscall.total_latency = int(total_line.strip())
@@ -148,13 +170,12 @@ def collect_stats(syscall_stats):
                 hist_line = file.readline().strip()
                 syscall.latency_hist = [int(x) for x in hist_line.split()]
 
-                syscall_stats.append(syscall)
+                stats.append(syscall)
 
     except FileNotFoundError:
-        print("File not found")
-        return 1
-
-    return 0
+        raise RuntimeError("syscall-trace proc entry missing")
+    
+    return stats
 
 def insert_module():
 
@@ -166,20 +187,20 @@ def insert_module():
         subprocess.run(["make"], check=True)
         
         print("Checking if old module is already loaded...\n")
-        if remove_module() != 0:
-            return 1
+        remove_module()
 
         print("Inserting module...\n")
         subprocess.run(["insmod", "syscall_trace.ko"], check=True)
 
         print("Module inserted!\n")
 
-    except subprocess.CalledProcessError:
-        print("Module insertion failed.")
-        remove_module()
-        return 1
-    
-    return 0
+    except Exception as e:
+        print("Error:", e)
+        try:
+            remove_module()
+        except Exception as cleanup_err:
+            print("Cleanup error:", cleanup_err)
+        raise RuntimeError("failed to insert module") from e
 
 def remove_module():
 
@@ -189,9 +210,9 @@ def remove_module():
             subprocess.run(["rmmod", "syscall_trace.ko"], check=True)
             print("Module has been removed.")
 
-    except subprocess.CalledProcessError:
-        print("Module removal failed.")
-        return 1
+    except Exception as e:
+        print("Error:", e)
+        raise RuntimeError("failed to remove module")
     
     return 0
 
