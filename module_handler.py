@@ -64,34 +64,28 @@ def start_handler():
 
 def run_module(stress_type, duration):
 
-    # Notify module to start collecting
-    try:
-        with open("/proc/syscall-trace", "w") as f:
-            f.write(str(duration))
-    except FileNotFoundError:
-        print("File not found")
-        return 1
+    stress_duration = duration + 1
 
     # Induce a load for the test_type
     match stress_type:
         case StressType.CPU:
             print("Running CPU test...")
             proc = subprocess.Popen(
-                ["stress", "--cpu", "2", "--timeout", str(duration)],
+                ["stress", "--cpu", "2", "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
         case StressType.IO:
             print("Running IO test...")
             proc = subprocess.Popen(
-                ["stress", "--io", "2", "--timeout", str(duration)],
+                ["stress", "--io", "2", "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
         case StressType.MEM:
             print("Running Memory test...")
             proc = subprocess.Popen(
-                ["stress", "--vm", "1", "--vm-bytes", "2G", "--timeout", str(duration)],
+                ["stress", "--vm", "1", "--vm-bytes", "2G", "--timeout", str(stress_duration)],
                 stdout=subprocess.DEVNULL,
             )
 
@@ -104,11 +98,21 @@ def run_module(stress_type, duration):
                     "--io", "1",
                     "--vm", "1",
                     "--vm-bytes", "2G",
-                    "--timeout", str(duration)
+                    "--timeout", str(stress_duration)
                 ],
                 stdout=subprocess.DEVNULL,
             )
-    
+            
+    time.sleep(1)  # let stress ramp up
+
+    # Notify module to start collecting
+    try:
+        with open("/proc/syscall-trace", "w") as f:
+            f.write(str(duration))
+    except FileNotFoundError:
+        print("File not found")
+        return 1
+
     time.sleep(duration)
     proc.wait()
 
@@ -141,9 +145,8 @@ def collect_stats(syscall_stats):
                 syscall.total_latency = int(total_line.strip())
                 syscall.max_latency = int(max_line.strip())
 
-                # Histogram (still optional)
-                # hist_line = file.readline().strip()
-                # syscall.latency_hist = [int(x) for x in hist_line.split()]
+                hist_line = file.readline().strip()
+                syscall.latency_hist = [int(x) for x in hist_line.split()]
 
                 syscall_stats.append(syscall)
 
@@ -195,10 +198,11 @@ def remove_module():
 def print_stats(syscall_stats):
 
     for stat in syscall_stats:
-        print(
-            f"{stat.name}\n"
-            f"{stat.count} {stat.total_latency} {stat.max_latency}"
-        )
+        print(f"{stat.name}")
+        print(f"{stat.count} {stat.total_latency} {stat.max_latency}")
+        print("Histogram:")
+        print(" ".join(str(v) for v in stat.latency_hist))
+        print()
 
 if __name__ == "__main__":
     main()

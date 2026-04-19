@@ -68,6 +68,12 @@ static const char *syscall_symbols[NUM_SYSCALLS] = {
 	[SYSCALL_CLONE] = "__x64_sys_clone",
 };
 
+static const u64 bucket_bounds[NUM_BUCKETS] = {
+    1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 64e3, 128e3,
+    256e3, 512e3, 1e6, 2e6, 4e6, 8e6, 16e6, 32e6,
+    64e6, 128e6, 256e6, 512e6, 1e9, 2e9, 4e9, U64_MAX
+};
+
 static void *my_seq_start(struct seq_file *s, loff_t *pos)
 {
 	// Each sequence prints one syscall's stats
@@ -102,6 +108,10 @@ static int my_seq_show(struct seq_file *s, void *v)
 	seq_printf(s, "%llu\n", stat->count);
 	seq_printf(s, "%llu\n", stat->total_latency);
 	seq_printf(s, "%llu\n", stat->max_latency);
+	
+	for (int j = 0; j < NUM_BUCKETS; j++)
+    	seq_printf(s, "%llu ", stat->latency_hist[j]);
+	seq_putc(s, '\n');
 
 	return 0;
 }
@@ -255,6 +265,11 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 			pr_info("syscall exit: pid=%d comm=%s latency=%llu ns\n", current->pid, current->comm, latency);
 
         s->max_latency = max(s->max_latency, latency);
+
+		int bucket = 0;
+		while (latency > bucket_bounds[bucket])
+			bucket++;
+		s->latency_hist[bucket]++;
     }
 
     // Always clear to avoid stale valid/start_time
