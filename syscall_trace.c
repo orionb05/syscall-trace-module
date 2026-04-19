@@ -31,10 +31,17 @@ static char input_buffer[INPUT_MAX_LEN];
 
 static u64 run_start_time = 0;
 static u64 run_end_time = 0;
+static int run_syscall_id;
 
 static struct proc_dir_entry *entry;
 
 #define NUM_BUCKETS 24
+static const u64 bucket_bounds[NUM_BUCKETS] = {
+    1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 64e3, 128e3,
+    256e3, 512e3, 1e6, 2e6, 4e6, 8e6, 16e6, 32e6,
+    64e6, 128e6, 256e6, 512e6, 1e9, 2e9, 4e9, U64_MAX
+};
+
 struct syscall_stats {
 	u64 count;
 	u64 total_latency;
@@ -51,6 +58,7 @@ static struct syscall_stats global_stats[NUM_SYSCALLS];
 struct probe_wrapper {
     struct kretprobe krp;
     struct syscall_stats __percpu *stats;
+	int syscall_id;
 };
 static struct probe_wrapper probes[NUM_SYSCALLS];
 
@@ -68,31 +76,16 @@ static const char *syscall_symbols[NUM_SYSCALLS] = {
 	[SYSCALL_OPENAT] = "__x64_sys_openat",
 };
 
-static const u64 bucket_bounds[NUM_BUCKETS] = {
-    1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 64e3, 128e3,
-    256e3, 512e3, 1e6, 2e6, 4e6, 8e6, 16e6, 32e6,
-    64e6, 128e6, 256e6, 512e6, 1e9, 2e9, 4e9, U64_MAX
-};
-
 static void *my_seq_start(struct seq_file *s, loff_t *pos)
 {
-	// Each sequence prints one syscall's stats
-	if (*pos < NUM_SYSCALLS) {
-		return &(global_stats[*pos]);
-	}
-
-	*pos = 0;
-	return NULL;
+    if (*pos == 0)
+        return &global_stats[run_syscall_id];
+    return NULL;
 }
 
 static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos)
 {
-	(*pos)++;
-	if (*pos >= NUM_SYSCALLS) {
-		return NULL;
-	}
-
-	return &(global_stats[*pos]);
+	return NULL;
 }
 
 static void my_seq_stop(struct seq_file *s, void *v)
@@ -168,12 +161,31 @@ static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t 
 
 	*off += len;
 
-	// Convert user input to an integer
-	unsigned int run_time_seconds;
-	if (kstrtoint(input_buffer, 10, &run_time_seconds))
+	// Collect and store user input
+	char *p = input_buffer;
+	char *tok;
+
+	// Grab the syscall_id first
+	tok = strsep(&p, ",");
+	if (!tok)
 		return -EINVAL;
 
-	if (run_time_seconds == 0 || run_time_seconds > 1024)
+	if (kstrtoint(tok, 10, &run_syscall_id))
+		return -EINVAL;
+
+	if (run_syscall_id < 0 || run_syscall_id >= NUM_SYSCALLS)
+		return -EINVAL;
+
+	// Grab the run time
+	tok = strsep(&p, ",");
+	if (!tok)
+		return -EINVAL;
+
+	unsigned int run_time_seconds;
+	if (kstrtoint(tok, 10, &run_time_seconds))
+		return -EINVAL;
+
+	if (run_time_seconds <= 0 || run_time_seconds > 1024)
 		return -EINVAL;
 
 	// Clean syscall stats
@@ -228,6 +240,11 @@ static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 	if (now < start || now > end)
 		return 0;
 
+	struct kretprobe *kp = get_kretprobe(ki);
+    struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+	if (pw->syscall_id != READ_ONCE(run_syscall_id))
+		return 0;
+
 	struct probe_data *d = (struct probe_data *)ki->data;
 	d->entry_time = now;
 	d->valid = 1;
@@ -241,6 +258,12 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 	u64 start = READ_ONCE(run_start_time);
     u64 end = READ_ONCE(run_end_time);
 
+	// Drop syscalls that arent the focus
+	struct kretprobe *kp = get_kretprobe(ki);
+	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+	if (pw->syscall_id != READ_ONCE(run_syscall_id))
+		return 0;
+
     struct probe_data *d = (struct probe_data *)ki->data;
 
 	// Drop syscalls that skipped the entry handler
@@ -252,9 +275,7 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 
 	// Update stats for a valid syscall
     if (in_window) {
-        struct kretprobe *kp = get_kretprobe(ki);
-        struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
-        struct syscall_stats *s = this_cpu_ptr(pw->stats);
+		struct syscall_stats *s = this_cpu_ptr(pw->stats);
 
         u64 latency = now - d->entry_time;
 
@@ -290,6 +311,8 @@ static int __init mod_init(void)
 		probes[i].krp.data_size = sizeof(struct probe_data);
 
 		probes[i].stats = &percpu_stats[i];
+
+		probes[i].syscall_id = i;
 
 		// Store probe pointer for the registration function
 		syscall_kretprobe_ptrs[i] = &(probes[i].krp);
