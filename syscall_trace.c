@@ -29,7 +29,8 @@
 #define INPUT_MAX_LEN 33
 static char input_buffer[INPUT_MAX_LEN];
 
-static u64 run_until_time = 0;
+static u64 run_start_time = 0;
+static u64 run_end_time = 0;
 
 static struct proc_dir_entry *entry;
 
@@ -139,6 +140,9 @@ static int my_seq_open(struct inode *inode, struct file *file)
 // Recieve the collection time, reset the statistics, and start collecting syscall stats
 static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t len, loff_t *off)
 {
+	if (*off != 0)
+    	return -EINVAL;
+
 	if (len == 0)
 		return -EINVAL;
 
@@ -172,10 +176,12 @@ static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t 
 	}
 
 	// Signal probes to run for the specified time
-	WRITE_ONCE(run_until_time, ktime_get_ns() + run_time_seconds * NSEC_PER_SEC);
+	u64 now = ktime_get_ns();
+	WRITE_ONCE(run_start_time, now);
+	WRITE_ONCE(run_end_time, now + run_time_seconds * NSEC_PER_SEC);
 
-	pr_info("Starting collection at %llu seconds\n", ktime_get_ns() / NSEC_PER_SEC);
-	pr_info("Ending at %llu seconds\n", run_until_time / NSEC_PER_SEC);
+	pr_info("Syscall_trace starting at time: %llu\n", run_start_time);
+	pr_info("Ending at time: %llu\n", run_end_time);
 
 	return len;
 }
@@ -205,8 +211,11 @@ static const struct file_operations file_ops = {
 
 static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
+	u64 start = READ_ONCE(run_start_time);
+    u64 end = READ_ONCE(run_end_time);
 	u64 now = ktime_get_ns();
-	if (READ_ONCE(run_until_time) == 0 || now > READ_ONCE(run_until_time))
+
+	if (now < start || now > end)
 		return 0;
 
 	struct probe_data *d = (struct probe_data *)ki->data;
@@ -219,16 +228,19 @@ static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
 	u64 now = ktime_get_ns();
+	u64 start = READ_ONCE(run_start_time);
+    u64 end = READ_ONCE(run_end_time);
 
     struct probe_data *d = (struct probe_data *)ki->data;
 
-    // Skip if entry never ran for this instance,
-    if (d->valid != 1) {
-		return 0;
-	}
+	// Drop syscalls that skipped the entry handler
+	if (!d->valid)
+        return 0;
 
-	// Update stats if the run has started
-	bool in_window = READ_ONCE(run_until_time) != 0 && now <= READ_ONCE(run_until_time);
+	// Drop syscalls that started before or exit after this run
+	bool in_window = d->entry_time >= start && now <= end;
+
+	// Update stats for a valid syscall
     if (in_window) {
         struct kretprobe *kp = get_kretprobe(ki);
         struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
@@ -245,7 +257,7 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
         s->max_latency = max(s->max_latency, latency);
     }
 
-    // Always clear to avoid stale valid/entry_time
+    // Always clear to avoid stale valid/start_time
     d->valid = 0;
 
     return 0;
