@@ -2,6 +2,8 @@ import subprocess
 import time
 from enum import Enum
 import psutil
+import matplotlib.pyplot as plt
+import numpy as np
 
 DURATION = 8
 
@@ -14,9 +16,7 @@ class SyscallSymbols(Enum):
 bucket_bounds = [
     "1e3", "2e3", "4e3", "8e3", "16e3",
     "32e3", "64e3", "128e3", "256e3", "512e3",
-    "1e6", "2e6", "4e6", "8e6", "16e6",
-    "32e6", "64e6", "128e6", "256e6", "512e6",
-    "1e9", "2e9", "4e9", "8e9"
+    "1e6", "2e6", "4e6", "8e6", "16e6", "32e6"
 ]
 
 class SyscallEntry:
@@ -66,10 +66,9 @@ def start_handler():
                 results.append(entry)
             except Exception as e:
                 raise RuntimeError(f"Failed during module test (level {intensity_level})") from e
-            
-        # TODO: Use a visualizer to print stats
 
         print_results(results)
+        graph_results(results)
 
 def induce_load(intensity_level):
 
@@ -230,6 +229,59 @@ def remove_module():
         raise RuntimeError("failed to remove module")
     
     return 0
+
+def graph_results(results):
+    
+    plot_avg_and_max(results)
+    plot_histograms(results)
+    plt.show()
+
+def plot_histograms(entries):
+    num_buckets = len(bucket_bounds)
+    x = np.arange(num_buckets)
+    width = 0.25
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    for i, entry in enumerate(entries):
+        ax.bar(
+            x + i * width,
+            entry.latency_hist,
+            width,
+            label=f"Intensity {entry.intensity}",
+        )
+
+    ax.set_xticks(x + width)
+    ax.set_xticklabels(bucket_bounds, rotation=45, ha="right")
+
+    ax.set_yscale("log")
+
+    ax.set_xlabel("Latency Bucket")
+    ax.set_ylabel("Count (log scale)")
+    ax.set_title(f"Latency Histogram Comparison for {entries[0].symbol}")
+    ax.legend()
+    fig.tight_layout()
+
+def plot_avg_and_max(results):
+    intensities = [entry.intensity for entry in results]
+    avg_latencies = [entry.avg_latency for entry in results]
+    max_latencies = [entry.max_latency for entry in results]
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+    ax1.set_title(f"Latency for {results[0].symbol} syscall")
+
+    ax1.plot(intensities, avg_latencies, marker="o", color="blue")
+    ax2.set_xlabel("Intensity Level")
+    ax1.set_ylabel("Average Latency (ns)")
+    ax1.set_xticks(intensities)
+
+    ax2.plot(intensities, max_latencies, marker="o", color="red")
+    ax2.set_xlabel("Intensity Level")
+    ax2.set_ylabel("Max Latency (ns)")
+    ax2.set_xticks(intensities)
+
+    fig.tight_layout()
 
 def print_results(results):
 

@@ -36,11 +36,10 @@ static int generator_pid;
 
 static struct proc_dir_entry *entry;
 
-#define NUM_BUCKETS 24
+#define NUM_BUCKETS 16
 static const u64 bucket_bounds[NUM_BUCKETS] = {
     1e3, 2e3, 4e3, 8e3, 16e3, 32e3, 64e3, 128e3,
-    256e3, 512e3, 1e6, 2e6, 4e6, 8e6, 16e6, 32e6,
-    64e6, 128e6, 256e6, 512e6, 1e9, 2e9, 4e9, U64_MAX
+    256e3, 512e3, 1e6, 2e6, 4e6, 8e6, 16e6, U64_MAX
 };
 
 struct syscall_stats {
@@ -289,7 +288,7 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 		s->max_latency = max(s->max_latency, latency);
 
 		int bucket = 0;
-		while (bucket < NUM_BUCKETS - 1 && latency > bucket_bounds[bucket])
+		while (latency > bucket_bounds[bucket])
 			bucket++;
 		s->latency_hist[bucket]++;
 	}
