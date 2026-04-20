@@ -8,6 +8,9 @@
 *.order
 *.cmd
 
+# Syscall generator binaries
+generators/sysgen_*
+
 # Dependency and metadata files
 *.d
 *.dwo
