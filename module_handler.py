@@ -98,69 +98,50 @@ def induce_load(intensity_level):
 
     return proc
 
-def hammer_syscall(syscall):
+def generate_syscalls(syscall):
 
     # Activate the syscall repeatedly
     match syscall:
         case SyscallSymbols.READ:
-            print("Inducing read() syscall activity...")
-            proc = subprocess.Popen(
-                ["bash", "-c", f"timeout {DURATION}s bash -c 'while :; do dd if=/dev/zero of=/dev/null bs=4K count=1 status=none; done'"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            print("Generating read() syscalls...")
+            return subprocess.Popen(["./generators/sysgen_read", str(DURATION)])
 
         case SyscallSymbols.MMAP:
-            print("Inducing mmap() syscall activity...")
-            proc = subprocess.Popen(
-                ["bash", "-c", f"timeout {DURATION}s bash -c 'while :; do dd if=/dev/zero of=/tmp/mmap_test bs=4K count=1 status=none; rm -f /tmp/mmap_test; done'"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            print("Generating mmap() syscalls...")
+            return subprocess.Popen(["./generators/sysgen_mmap", str(DURATION)])
 
         case SyscallSymbols.FUTEX:
-            print("Inducing futex() syscall activity...")
-            proc = subprocess.Popen(
-                ["bash", "-c", f"timeout {DURATION}s bash -c 'python3 - <<\"EOF\"\nimport threading, time\nlock = threading.Lock()\nend = time.time() + {DURATION}\nwhile time.time() < end:\n    with lock:\n        pass\nEOF'"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            print("Generating futex() syscalls...")
+            return subprocess.Popen(["./generators/sysgen_futex", str(DURATION)])
 
         case SyscallSymbols.OPENAT:
-            print("Inducing openat() syscall activity...")
-            proc = subprocess.Popen(
-                ["bash", "-c", f"timeout {DURATION}s bash -c 'while :; do fd=$(mktemp); cat /dev/null > \"$fd\"; rm -f \"$fd\"; done'"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-    return proc
+            print("Generating openat() syscalls...")
+            return subprocess.Popen(["./generators/sysgen_openat", str(DURATION)])
 
 def run_with_load(syscall, intensity_level):
 
     # Start stress first for buildup then repeatedly activate the syscall
     stress_proc = induce_load(intensity_level)
-    hammer_proc = hammer_syscall(syscall)
+    generator_proc = generate_syscalls(syscall)
 
     try:
-        run_module(syscall)
-        # Wait for both subprocesses if they exist
-        for proc in (stress_proc, hammer_proc):
+        run_module(syscall, generator_proc.pid)
+        for proc in (stress_proc, generator_proc):
             if proc:
                 proc.wait()
     finally:
         # Ensure cleanup even if an exception occurs
-        for proc in (stress_proc, hammer_proc):
+        for proc in (stress_proc, generator_proc):
             if proc and proc.poll() is None:
                 proc.terminate()
 
-def run_module(syscall):
+def run_module(syscall, generator_pid):
     # Notify module to start collecting
     print("Setup complete, enabling module to start collection...\n")
 
     try:
         with open("/proc/syscall-trace", "w") as f:
-            f.write(f"{syscall.value},{DURATION}")
+            f.write(f"{syscall.value},{DURATION},{generator_pid}")
     except FileNotFoundError:
         raise RuntimeError("syscall-trace proc entry missing")
 

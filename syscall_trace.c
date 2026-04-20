@@ -32,6 +32,7 @@ static char input_buffer[INPUT_MAX_LEN];
 static u64 run_start_time = 0;
 static u64 run_end_time = 0;
 static int run_syscall_id;
+static int generator_pid;
 
 static struct proc_dir_entry *entry;
 
@@ -188,6 +189,15 @@ static ssize_t my_proc_write(struct file *file, const char __user *buff, size_t 
 	if (run_time_seconds <= 0 || run_time_seconds > 1024)
 		return -EINVAL;
 
+	// Grab the pid of the handler generator process
+	tok = strsep(&p, ",");
+	if (tok) {
+		if (kstrtoint(tok, 10, &generator_pid))
+			return -EINVAL;
+		if (generator_pid < 0)
+			return -EINVAL;
+	}
+
 	// Clean syscall stats
 	int cpu;
 	for_each_possible_cpu(cpu) {
@@ -233,21 +243,23 @@ static const struct file_operations file_ops = {
 
 static int entry_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 {
+	struct kretprobe *kp = get_kretprobe(ki);
+    struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
+	struct probe_data *d = (struct probe_data *)ki->data;
+
 	u64 start = READ_ONCE(run_start_time);
     u64 end = READ_ONCE(run_end_time);
 	u64 now = ktime_get_ns();
 
-	if (now < start || now > end)
-		return 0;
+	// Fast exit for non‑target syscalls or inactive window
+    bool invalid = ((generator_pid != 0 && current->pid != generator_pid) ||  // not generator process
+        			(pw->syscall_id != READ_ONCE(run_syscall_id)) ||    // not target syscall
+        			(now < start) || (now > end));                      // outside active window
 
-	struct kretprobe *kp = get_kretprobe(ki);
-    struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
-	if (pw->syscall_id != READ_ONCE(run_syscall_id))
-		return 0;
-
-	struct probe_data *d = (struct probe_data *)ki->data;
-	d->entry_time = now;
-	d->valid = 1;
+	if (!invalid) {
+		d->entry_time = now;
+		d->valid = 1;
+	}
 
 	return 0;
 }
@@ -258,40 +270,29 @@ static int exit_callback(struct kretprobe_instance *ki, struct pt_regs *regs)
 	u64 start = READ_ONCE(run_start_time);
     u64 end = READ_ONCE(run_end_time);
 
-	// Drop syscalls that arent the focus
 	struct kretprobe *kp = get_kretprobe(ki);
 	struct probe_wrapper *pw = container_of(kp, struct probe_wrapper, krp);
-	if (pw->syscall_id != READ_ONCE(run_syscall_id))
-		return 0;
-
     struct probe_data *d = (struct probe_data *)ki->data;
 
-	// Drop syscalls that skipped the entry handler
-	if (!d->valid)
-        return 0;
+	// Fast exit for non‑target syscalls or invalid timing
+	bool invalid = ((d->valid != 1) ||                                 // skipped entry handler
+					(d->entry_time < start || now > end));              // outside active window
 
-	// Drop syscalls that started before or exit after this run
-	bool in_window = d->entry_time >= start && now <= end;
-
-	// Update stats for a valid syscall
-    if (in_window) {
+	if (!invalid) {
 		struct syscall_stats *s = this_cpu_ptr(pw->stats);
 
-        u64 latency = now - d->entry_time;
+		u64 latency = now - d->entry_time;
 
-        s->count++;
-        s->total_latency += latency;
+		s->count++;
+		s->total_latency += latency;
 
-		if (latency > (u64)1.5e9)
-			pr_info("syscall exit: pid=%d comm=%s latency=%llu ns\n", current->pid, current->comm, latency);
-
-        s->max_latency = max(s->max_latency, latency);
+		s->max_latency = max(s->max_latency, latency);
 
 		int bucket = 0;
-		while (latency > bucket_bounds[bucket])
+		while (bucket < NUM_BUCKETS - 1 && latency > bucket_bounds[bucket])
 			bucket++;
 		s->latency_hist[bucket]++;
-    }
+	}
 
     // Always clear to avoid stale valid/start_time
     d->valid = 0;
