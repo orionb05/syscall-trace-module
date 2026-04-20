@@ -11,12 +11,21 @@ class SyscallSymbols(Enum):
     FUTEX = 2
     OPENAT = 3
 
+bucket_bounds = [
+    "1e3", "2e3", "4e3", "8e3", "16e3",
+    "32e3", "64e3", "128e3", "256e3", "512e3",
+    "1e6", "2e6", "4e6", "8e6", "16e6",
+    "32e6", "64e6", "128e6", "256e6", "512e6",
+    "1e9", "2e9", "4e9", "8e9"
+]
+
 class SyscallEntry:
     def __init__(self):
         self.intensity = 0
         self.symbol = ""
         self.count = 0
         self.total_latency = 0
+        self.avg_latency = 0
         self.max_latency = 0
         self.latency_hist = []
 
@@ -173,6 +182,8 @@ def collect_stats():
             entry.total_latency = int(total_line.strip())
             entry.max_latency = int(max_line.strip())
 
+            entry.avg_latency = entry.total_latency // entry.count if entry.count else 0
+
             hist_line = file.readline().strip()
             entry.latency_hist = [int(x) for x in hist_line.split()]
 
@@ -226,9 +237,9 @@ def print_results(results):
 
     for entry in results:
         print(f"For intensity level {entry.intensity}:")
-        print(f"Count: {entry.count}. Total Latency: {entry.total_latency}. Max Latency: {entry.max_latency}.")
+        print(f"Latency Count: {entry.count}. Total: {entry.total_latency}. Average: {entry.avg_latency}. Max: {entry.max_latency}.")
         print("Histogram:")
-        print(" ".join(str(v) for v in entry.latency_hist))
+        print(" | ".join(f"{count} <{label}" for count, label in zip(entry.latency_hist, bucket_bounds)))
         print()
 
 if __name__ == "__main__":
