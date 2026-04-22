@@ -1,30 +1,41 @@
+#!/usr/bin/env python3
+#
+# module_handler.py
+#
+# Test harness for syscall_trace kernel module. Manages module installation,
+# generates syscall load at varying stress levels, collects statistics, and
+# produces graphs and logs for analysis.
+
 import subprocess
 import time
 from enum import Enum
-import psutil
 from pathlib import Path
+
+import psutil
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Test configuration
 DURATION = 8
-
-# Standardized results directory for output
 PROJECT_ROOT = Path(__file__).resolve().parent
 RESULTS_DIR = PROJECT_ROOT / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+# System calls tracked by the kernel module
 class SyscallSymbols(Enum):
     READ = 0
     MMAP = 1
     FUTEX = 2
     OPENAT = 3
 
+# Latency histogram bucket boundaries (nanoseconds)
 bucket_bounds = [
     "1e3", "2e3", "4e3", "8e3", "16e3",
     "32e3", "64e3", "128e3", "256e3", "512e3",
     "1e6", "2e6", "4e6", "8e6", "16e6", "32e6"
 ]
 
+# Data structure to hold syscall statistics from module
 class SyscallEntry:
     def __init__(self):
         self.intensity = 0
@@ -35,6 +46,9 @@ class SyscallEntry:
         self.max_latency = 0
         self.latency_hist = []
 
+
+
+# Main entry point
 def main():
     try:
         insert_module()
@@ -44,11 +58,11 @@ def main():
         print("Error:", e)
         return
 
+
+# Interactive testing loop
 def start_handler():
-
-    # Handler loop
+    # User-controlled handler loop
     while True:
-
         # Collect syscall of interest from user
         print("Syscall to test: \n0. read\n1. mmap\n2. futex\n3. openat")
         while True:
@@ -63,7 +77,7 @@ def start_handler():
 
         results = []
 
-        # Run module with varying stress levels
+        # Run module with varying stress levels (0, 1, 2)
         for intensity_level in range(3):
             try:
                 run_with_load(syscall, intensity_level)
@@ -76,13 +90,15 @@ def start_handler():
         print_results(results)
         graph_results(results)
 
-def induce_load(intensity_level):
 
-    # Collect system info for dynamic and safe stresses
+
+# Load and stress generation
+def induce_load(intensity_level):
+    # Retrieve system capabilities for safe stress scaling
     cores = psutil.cpu_count(logical=True)
     ram_gb = psutil.virtual_memory().total // (1024 ** 3)
 
-    # Induce a stress load based on the intesnity
+    # Scale stress parameters based on intensity level
     if intensity_level == 2:
         print("Inducing high-intensity stress...")
         cores = max(1, int(cores))
@@ -95,6 +111,7 @@ def induce_load(intensity_level):
         print("Inducing low-intensity (no stress)...")
         return None
     
+    # Launch stress process
     proc = subprocess.Popen(
         [
             "stress",
@@ -108,13 +125,13 @@ def induce_load(intensity_level):
         stderr=subprocess.DEVNULL
     )
 
-    time.sleep(1)  # let stress ramp up
+    time.sleep(1)  # Allow stress to ramp up
 
     return proc
 
-def generate_syscalls(syscall):
 
-    # Activate the syscall repeatedly
+def generate_syscalls(syscall):
+    # Launch syscall generator for the target syscall
     match syscall:
         case SyscallSymbols.READ:
             print("Generating read() syscalls...")
@@ -132,9 +149,9 @@ def generate_syscalls(syscall):
             print("Generating openat() syscalls...")
             return subprocess.Popen(["./generators/sysgen_openat", str(DURATION)])
 
-def run_with_load(syscall, intensity_level):
 
-    # Start stress first for buildup then repeatedly activate the syscall
+def run_with_load(syscall, intensity_level):
+    # Coordinate stress process and syscall generator
     stress_proc = induce_load(intensity_level)
     generator_proc = generate_syscalls(syscall)
 
@@ -149,8 +166,10 @@ def run_with_load(syscall, intensity_level):
             if proc and proc.poll() is None:
                 proc.terminate()
 
+
+# Module communication
 def run_module(syscall, generator_pid):
-    # Notify module to start collecting
+    # Signal module to start collection with target syscall and generator PID
     print("Setup complete, enabling module to start collection...\n")
 
     try:
@@ -163,12 +182,14 @@ def run_module(syscall, generator_pid):
     print("Module has finished.\n")
 
 
+# Statistics collection
 def collect_stats():
-
+    # Read aggregated statistics from kernel module
     try:
         with open("/proc/syscall-trace", "r") as file:
             entry = SyscallEntry()
 
+            # Parse syscall symbol name
             line = file.readline().strip()
             if not line:
                 return
@@ -176,6 +197,7 @@ def collect_stats():
             prefix = "__x64_sys_"
             entry.symbol = line[len(prefix):].strip() if line.startswith(prefix) else line
 
+            # Parse count, latency totals
             count_line = file.readline()
             total_line = file.readline()
             max_line = file.readline()
@@ -187,8 +209,10 @@ def collect_stats():
             entry.total_latency = int(total_line.strip())
             entry.max_latency = int(max_line.strip())
 
+            # Calculate average latency
             entry.avg_latency = entry.total_latency // entry.count if entry.count else 0
 
+            # Parse histogram data
             hist_line = file.readline().strip()
             entry.latency_hist = [int(x) for x in hist_line.split()]
 
@@ -197,8 +221,11 @@ def collect_stats():
     
     return entry
 
-def insert_module():
 
+
+# Module management
+def insert_module():
+    # Build and install the kernel module
     try:
         print("Cleaning project directory...\n")
         subprocess.run(["make", "clean"], check=True, stdout=subprocess.DEVNULL,)
@@ -222,8 +249,9 @@ def insert_module():
             print("Cleanup error:", cleanup_err)
         raise RuntimeError("failed to insert module") from e
 
-def remove_module():
 
+def remove_module():
+    # Unload the kernel module if present
     try:
         res = subprocess.run(["grep", "syscall_trace", "/proc/modules"], stdout=subprocess.PIPE)
         if res.stdout.split():
@@ -236,8 +264,11 @@ def remove_module():
     
     return 0
 
-def graph_results(results):
 
+
+# Output and visualization
+def graph_results(results):
+    # Generate and save comparison graphs
     plot_avg_and_max(results)
     plt.savefig(f"{RESULTS_DIR}/avg_and_max.png", dpi=150)
 
@@ -246,13 +277,16 @@ def graph_results(results):
 
     plt.show()
 
+
 def plot_histograms(entries):
+    # Create histogram comparison across stress levels
     num_buckets = len(bucket_bounds)
     x = np.arange(num_buckets)
     width = 0.25
 
     fig, ax = plt.subplots(figsize=(14, 6))
 
+    # Plot histogram for each intensity level
     for i, entry in enumerate(entries):
         ax.bar(
             x + i * width,
@@ -272,7 +306,9 @@ def plot_histograms(entries):
     ax.legend()
     fig.tight_layout()
 
+
 def plot_avg_and_max(results):
+    # Create comparison plots for average and maximum latencies
     intensities = [entry.intensity for entry in results]
     avg_latencies = [entry.avg_latency for entry in results]
     max_latencies = [entry.max_latency for entry in results]
@@ -281,18 +317,20 @@ def plot_avg_and_max(results):
 
     ax1.set_title(f"Latency for {results[0].symbol} syscall")
 
+    # Plot average latencies
     ax1.plot(intensities, avg_latencies, marker="o", color="blue")
     ax2.set_xlabel("Intensity Level")
     ax1.set_ylabel("Average Latency (ns)")
     ax1.set_xticks(intensities)
 
+    # Plot maximum latencies on log scale
     ax2.plot(intensities, max_latencies, marker="o", color="red")
     ax2.set_xlabel("Intensity Level")
     ax2.set_ylabel("Max Latency (ns)")
     ax2.set_xticks(intensities)
     ax2.set_yscale("log")
 
-    # Show numeric values above each maximum point
+    # Annotate maximum points with values
     for x, y in zip(intensities, max_latencies):
         ax2.text(
             x, y * 1.1,
@@ -303,12 +341,15 @@ def plot_avg_and_max(results):
 
     fig.tight_layout()
 
+
 def print_results(results):
+    # Print results to console and log file
     log_path = RESULTS_DIR / "results.log"
 
     lines = []
     lines.append(f"Printing results for the {results[0].symbol} syscall.\n")
 
+    # Format results for each intensity level
     for entry in results:
         lines.append(f"For intensity level {entry.intensity}:")
         lines.append(
@@ -326,6 +367,7 @@ def print_results(results):
     with open(log_path, "a") as f:
         for line in lines:
             f.write(line + "\n")
+
 
 if __name__ == "__main__":
     main()
