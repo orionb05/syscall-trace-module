@@ -322,7 +322,7 @@ static int __init mod_init(void)
 	if (ret)
 		goto kretprobe_fail;
 
-	entry = proc_create(PROCFS_FILENAME, 0, NULL, &file_ops);
+	entry = proc_create(PROCFS_FILENAME, 0666, NULL, &file_ops);
 	if (!entry) {
 		ret = -ENOMEM;
 		goto proc_fail;

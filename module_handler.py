@@ -2,10 +2,16 @@ import subprocess
 import time
 from enum import Enum
 import psutil
+from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
 DURATION = 8
+
+# Standardized results directory for output
+PROJECT_ROOT = Path(__file__).resolve().parent
+RESULTS_DIR = PROJECT_ROOT / "results"
+RESULTS_DIR.mkdir(exist_ok=True)
 
 class SyscallSymbols(Enum):
     READ = 0
@@ -204,7 +210,7 @@ def insert_module():
         remove_module()
 
         print("Inserting module...\n")
-        subprocess.run(["insmod", "syscall_trace.ko"], check=True)
+        subprocess.run(["sudo", "insmod", "syscall_trace.ko"], check=True)
 
         print("Module inserted!\n")
 
@@ -221,7 +227,7 @@ def remove_module():
     try:
         res = subprocess.run(["grep", "syscall_trace", "/proc/modules"], stdout=subprocess.PIPE)
         if res.stdout.split():
-            subprocess.run(["rmmod", "syscall_trace.ko"], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["sudo", "rmmod", "syscall_trace.ko"], check=True, stdout=subprocess.DEVNULL)
             print("Module has been removed.")
 
     except Exception as e:
@@ -231,9 +237,13 @@ def remove_module():
     return 0
 
 def graph_results(results):
-    
+
     plot_avg_and_max(results)
+    plt.savefig(f"{RESULTS_DIR}/avg_and_max.png", dpi=150)
+
     plot_histograms(results)
+    plt.savefig(f"{RESULTS_DIR}/histograms.png", dpi=150)
+
     plt.show()
 
 def plot_histograms(entries):
@@ -280,19 +290,42 @@ def plot_avg_and_max(results):
     ax2.set_xlabel("Intensity Level")
     ax2.set_ylabel("Max Latency (ns)")
     ax2.set_xticks(intensities)
+    ax2.set_yscale("log")
+
+    # Show numeric values above each maximum point
+    for x, y in zip(intensities, max_latencies):
+        ax2.text(
+            x, y * 1.1,
+            f"{y:.2e}",
+            ha="center", va="bottom",
+            fontsize=9, color="red"
+        )
 
     fig.tight_layout()
 
 def print_results(results):
+    log_path = RESULTS_DIR / "results.log"
 
-    print(f"Printing results for the {results[0].symbol} syscall\n.")
+    lines = []
+    lines.append(f"Printing results for the {results[0].symbol} syscall.\n")
 
     for entry in results:
-        print(f"For intensity level {entry.intensity}:")
-        print(f"Latency Count: {entry.count}. Total: {entry.total_latency}. Average: {entry.avg_latency}. Max: {entry.max_latency}.")
-        print("Histogram:")
-        print(" | ".join(f"{count} <{label}" for count, label in zip(entry.latency_hist, bucket_bounds)))
-        print()
+        lines.append(f"For intensity level {entry.intensity}:")
+        lines.append(
+            f"Latency Count: {entry.count}. Total: {entry.total_latency}. "
+            f"Average: {entry.avg_latency}. Max: {entry.max_latency}.")
+        lines.append("Histogram:")
+        lines.append(" | ".join(f"{count} <{label}" for count, label in zip(entry.latency_hist, bucket_bounds)))
+        lines.append("")
+
+    # Print to stdout
+    for line in lines:
+        print(line)
+
+    # Append to log file
+    with open(log_path, "a") as f:
+        for line in lines:
+            f.write(line + "\n")
 
 if __name__ == "__main__":
     main()

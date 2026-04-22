@@ -11,6 +11,9 @@
 # Syscall generator binaries
 generators/sysgen_*
 
+# Output files
+results/
+
 # Dependency and metadata files
 *.d
 *.dwo
